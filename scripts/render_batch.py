@@ -44,6 +44,11 @@ def render_sides(render_types, rndr, rndr_smpl, y, save_folder, subject, smpl_ty
                 rndr_smpl, 2, os.path.join(save_folder, subject, f"T_depth_{side}", f'{y:03d}.png')
             )
 
+        if "position" in render_types:
+            opengl_util.render_result(
+                rndr_smpl, 0, os.path.join(save_folder, subject, f"T_position_{side}", f'{y:03d}.png')
+            )
+
 
 def render_subject(subject, dataset, save_folder, rotation, size, render_types, egl):
 
@@ -86,10 +91,22 @@ def render_subject(subject, dataset, save_folder, rotation, size, render_types, 
         vmed[up_axis] = 0.5 * (vmax[up_axis] + vmin[up_axis])
 
         rndr_smpl = ColorRender(width=size, height=size, egl=egl)
+        # Load dapose smplx vertices.
+        dapose_vertices = np.load("./data/smpl_related/smpl_data/smplx-da-pose.npy")
+        dapose_vertices = (dapose_vertices - np.min(dapose_vertices, axis=0)) \
+            / (np.max(dapose_vertices, axis=0) - np.min(dapose_vertices, axis=0))
+        dapose_vertices = dapose_vertices.astype(float)
+        # dapose_vertices *= 255.
+        # print(dapose_vertices.max(), dapose_vertices.min(),
+        #       rescale_fitted_body.vertices.max(), rescale_fitted_body.vertices.min())
         rndr_smpl.set_mesh(
-            rescale_fitted_body.vertices, rescale_fitted_body.faces, rescale_fitted_body.vertices,
+            rescale_fitted_body.vertices, rescale_fitted_body.faces, dapose_vertices,
             rescale_fitted_body.vertex_normals
         )
+        # rndr_smpl.set_mesh(
+        #     rescale_fitted_body.vertices, rescale_fitted_body.faces, rescale_fitted_body.vertices,
+        #     rescale_fitted_body.vertex_normals
+        # )
         rndr_smpl.set_norm_mat(scan_scale, vmed)
 
         # camera
@@ -236,11 +253,11 @@ if __name__ == "__main__":
         render_types = ["light", "normal", "depth"]
     else:
         random.shuffle(subjects)
-        render_types = ["light", "normal"]
+        render_types = ["light", "normal", "depth", "position"]
 
     print(f"Rendering types: {render_types}")
 
-    NUM_GPUS = 2
+    NUM_GPUS = 1
     PROC_PER_GPU = mp.cpu_count() // NUM_GPUS
 
     queue = Queue()
@@ -250,7 +267,7 @@ if __name__ == "__main__":
         for _ in range(PROC_PER_GPU):
             queue.put(gpu_ids)
 
-    with Pool(processes=mp.cpu_count(), maxtasksperchild=1) as pool:
+    with Pool(processes=8, maxtasksperchild=1) as pool:
         for _ in tqdm(
             pool.imap_unordered(
                 partial(
