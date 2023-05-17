@@ -81,7 +81,8 @@ if __name__ == "__main__":
     os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
     
     NUM_GPUS = 2
-    PROC_PER_GPU = mp.cpu_count() // NUM_GPUS
+    PROCS = 8
+    PROC_PER_GPU = PROCS // NUM_GPUS
     queue = Queue()
     
     # initialize the queue with the GPU ids
@@ -89,7 +90,7 @@ if __name__ == "__main__":
         for _ in range(PROC_PER_GPU):
             queue.put(gpu_ids)
 
-    p = Pool(processes=mp.cpu_count(), maxtasksperchild=1)
+    p = Pool(processes=PROCS, maxtasksperchild=1)
     subjects = np.loadtxt(f"./data/{args.dataset}/all.txt", dtype=str)
 
     if args.debug:

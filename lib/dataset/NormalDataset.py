@@ -44,7 +44,7 @@ class NormalDataset():
         if self.split != 'train':
             self.rotations = range(0, 360, 120)
         else:
-            self.rotations = np.arange(0, 360, 360 // self.opt.rotation_num).astype(np.int)
+            self.rotations = np.arange(0, 360, 360 // self.opt.rotation_num).astype(np.int32)
 
         self.datasets_dict = {}
 
