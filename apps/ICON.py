@@ -574,6 +574,33 @@ class ICON(pl.LightningModule):
 
         test_log = {"chamfer": chamfer, "p2s": p2s, "NC": normal_consist}
 
+
+        # Save predicted mesh.
+        vertices = verts_pr.cpu().numpy()
+        faces = faces_pr.cpu().numpy()
+        mesh = trimesh.Trimesh(
+            vertices=vertices,
+            faces=faces,
+            process=False
+        )
+        vertex_colors = (mesh.vertex_normals + 1.) / 2.
+        mesh = trimesh.Trimesh(
+            vertices=vertices,
+            faces=faces,
+            vertex_colors=vertex_colors,
+            process=False
+        )
+        mesh.export(
+            osp.join(self.export_dir, f"est_mesh_{mesh_rot}.obj")
+        )
+
+        # 1. inverse projection
+        # Note, in Evaluator, verts_pr already normalize by reconstruct resolution.
+        # self.verts_pr -= self.recon_size / 2.0
+        # self.verts_pr /= self.recon_size / 2.0
+
+        # calib = batch["calib"][0]
+        
         return test_log
 
     def test_epoch_end(self, outputs):

@@ -24,9 +24,15 @@ class Camera:
     def __init__(self, width=1600, height=1200):
         # Focal Length
         # equivalent 50mm
-        focal = np.sqrt(width * width + height * height)
-        self.focal_x = focal
-        self.focal_y = focal
+        #============ Previous setting ============#
+        # focal = np.sqrt(width * width + height * height)
+        # self.focal_x = focal / 2.
+        # self.focal_y = focal / 2.
+        #============ Previous setting ============#
+        # Set defalut fov as 60 degree.
+        focal = np.sqrt(3) * height
+        self.focal_x = focal / 2.
+        self.focal_y = focal / 2.
         # Principal Point Offset
         self.principal_x = width / 2
         self.principal_y = height / 2
@@ -40,7 +46,10 @@ class Camera:
         self.far = 10
 
         # Camera Center
-        self.center = np.array([0, 0, 1.6])
+        #============ Previous setting ============#
+        # self.center = np.array([0, 0, 1.6])
+        #============ Previous setting ============#
+        self.center = np.array([0, 0, 2.0])
         self.direction = np.array([0, 0, -1])
         self.right = np.array([1, 0, 0])
         self.up = np.array([0, 1, 0])
@@ -66,7 +75,10 @@ class Camera:
     def get_real_z_value(self, z):
         z_near = self.near
         z_far = self.far
-        z_n = 2.0 * z - 1.0
+        z_n = z
+        # Important! In perspective setting, z value is already normalized to
+        # [-1, 1]. So this following line should be commented.
+        # z_n = 2.0 * z_n - 1.0 
         z_e = 2.0 * z_near * z_far / (z_far + z_near - z_n * (z_far - z_near))
         return z_e
 

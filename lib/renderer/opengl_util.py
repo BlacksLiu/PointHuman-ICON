@@ -38,6 +38,27 @@ def render_result(rndr, shader_id, path, mask=False):
         cam_render[:, :, -1] *= 2.0
         if not mask:
             cv2.imwrite(path, np.uint8(255.0 / 2.0 * (cam_render + 1.0)))
+            cam = rndr.camera
+            if cam.ortho_ratio is None:
+                # For perspective camera, we store depth value as numpy array to
+                # ensure the storing precision.
+                depth = cam_render[:, :, 0]
+                # depth = rndr.get_z_value()
+                depth_mask = depth > 0.01
+                depth = depth[depth_mask]
+                depth = cam.get_real_z_value(depth)
+                scan_scale = rndr.normalize_matrix[0, 0]
+                depth /= scan_scale
+                # print(f'{path}', np.max(depth), np.min(depth))
+                out = {
+                    "depth": depth,
+                    "mask": depth_mask
+                }
+                out_folder = os.path.dirname(path)
+                out_fname = os.path.basename(path)
+                out_fname, _ = os.path.splitext(out_fname)
+                path = os.path.join(out_folder, f"{out_fname}.npy")
+                np.save(path, out, allow_pickle=True)
         else:
             cv2.imwrite(path, np.uint8(-1.0 * cam_render[:, :, [3]]))
 
@@ -200,6 +221,40 @@ def load_calib(param, render_size=512):
     uv_intrinsic[2, 2] = 1.0 / float(render_size // 2)
 
     intrinsic = np.matmul(uv_intrinsic, scale_intrinsic)
+    calib = np.concatenate([extrinsic, intrinsic], axis=0)
+    return calib
+
+
+def load_perspective_calib(param, render_size=512):
+    # world unit / model unit
+    scale = param['scale']
+    # camera center world coordinate
+    center = param['center']
+    # model rotation
+    R = param['R']
+
+    translate = -np.matmul(R, center).reshape(3, 1)
+    extrinsic = np.concatenate([R, translate], axis=1)
+    extrinsic = np.concatenate([extrinsic, np.array([0, 0, 0, 1]).reshape(1, 4)], 0)
+    # camera translation
+    camera_center = param['camera_center']
+    extrinsic[:3, 3] -= camera_center / scale
+    # Match camera space to image pixel space
+
+    # intrinsic = np.zeros([4, 4])
+    # intrinsic[0, 0] = np.sqrt(2 * render_size * render_size)
+    # intrinsic[1, 1] = -np.sqrt(2 * render_size * render_size)
+    # intrinsic[0, 3] = render_size / 2.
+    # intrinsic[1, 3] = render_size / 2.
+    # intrinsic[2, 2] = 1.
+    # intrinsic[3, 2] = -1.
+
+    intrinsic = np.zeros([4, 4])
+    intrinsic[0, 0] = np.sqrt(3)
+    intrinsic[1, 1] = -np.sqrt(3)
+    intrinsic[2, 2] = 1.
+    intrinsic[3, 3] = 1.
+    
     calib = np.concatenate([extrinsic, intrinsic], axis=0)
     return calib
 

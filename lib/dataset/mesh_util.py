@@ -335,8 +335,8 @@ def get_visibility(xy, z, faces):
     faces = faces.long()
 
     # The defalut value of 2**12 is too slow. Change it to 2**11 according to
-    # https://github.com/YuliangXiu/ICON/issues/208.
-    rasterizer = Pytorch3dRasterizer(image_size=2**11)
+    # https://github.com/YuliangXiu/ICON/issues/208 if you want run faster.
+    rasterizer = Pytorch3dRasterizer(image_size=2**12)
     meshes_screen = Meshes(verts=xyz[None, ...], faces=faces[None, ...])
     raster_settings = rasterizer.raster_settings
 
