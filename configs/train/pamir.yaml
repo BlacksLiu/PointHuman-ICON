@@ -1,7 +1,9 @@
 name: pamir
 ckpt_dir: "./data/ckpt/"
-resume_path: "./data/ckpt/pamir.ckpt"
-normal_path: "./data/ckpt/normal.ckpt"
+# resume_path: "./data/ckpt/pamir.ckpt"
+# normal_path: "./data/ckpt/normal.ckpt"
+resume_path: "./data/ckpt/pamir/epoch=00.ckpt"
+normal_path: "./data/ckpt/normal/Normal-epoch=19.ckpt"
 results_path: "./results"
 
 dataset:

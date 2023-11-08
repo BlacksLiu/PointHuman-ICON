@@ -1,547 +1,355 @@
-from glob import glob 
-import os 
-subject_paths = sorted(glob("/mnt/local4T/pengfei/projects/PointHuman/PointHuman-ICON/data/cape_3views/*"))
-pred_root = "/mnt/local4T/pengfei/projects/PointHuman/PointHuman-ICON/results/icon-nofilter/cape"
-
-# load pred dir path 
-pred_paths = {
-    'est_mesh_0.obj': [],
-    'est_mesh_120.obj': [],
-    'est_mesh_240.obj': []
-}
-for path in subject_paths:
-    for key in pred_paths.keys():
-        subject_name = os.path.basename(path)
-        pred_scan_path = os.path.join(pred_root, f"{subject_name}/{key}")
-        if os.path.exists(pred_scan_path):
-            pred_paths[key].append(pred_scan_path)
-
-# load gt obj path
-gt_scans_root = "/mnt/local4T/pengfei/projects/PointHuman/PointHuman-ICON/data/cape/scans"
-gt_scan_paths = []
-for path in subject_paths:
-    subject_name = os.path.basename(path)
-    gt_scan_path = os.path.join(gt_scans_root, f"{subject_name}.obj")
-    if os.path.exists(gt_scan_path):
-        gt_scan_paths.append(gt_scan_path)
-
-
-# projection pcls and g.t. mesh 
-# load gt mesh and proj
-import os 
-from lib.renderer.mesh import load_scan
-import numpy as np
-os.environ["PYOPENGL_PLATFORM"] = "egl"
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
-import lib.renderer.opengl_util as opengl_util
-from lib.renderer.gl.init_gl import initialize_GL_context
-from lib.renderer.gl.color_render import ColorRender
-from lib.renderer.camera import Camera
-egl = True
-
-# two pointclouds chamfer distance 
-from pytorch3d.structures import Pointclouds
-from pytorch3d.loss.point_mesh_distance import _PointFaceDistance
-# from pytorch3d.loss import chamfer_distance
+import trimesh
+from PIL import Image
 import torch 
+import os 
+
+# pytorch3d pipeline:render normal from ground truth mesh
+from lib.common.render import Render, cleanShader
+from lib.evaluator.evaluator_util import (
+    NormalRender,
+    projection,
+    load_calib,
+    get_chamfer_distance,
+    get_p2s_distance,
+    get_pcls_normal_map,
+
+) 
+
+import os 
+import numpy as np
+from pytorch3d.renderer import (
+    FoVOrthographicCameras,
+    RasterizationSettings,
+    MeshRasterizer,
+    BlendParams,
+    MeshRenderer,
+    look_at_view_transform,
+    OrthographicCameras,
+    PointsRasterizationSettings,
+    PointsRenderer,
+    PointsRasterizer,
+    AlphaCompositor,
+)
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-from pytorch3d.ops.points_normals import estimate_pointcloud_normals
-from pytorch3d.structures import Pointclouds
+def get_camera(scale, device):
+    R, T = look_at_view_transform(20, 0, 0)
 
-def estimate_normals(xyzs):
-    """Estimate point normals. The pointcloud should be a sphere-like shape.
-
-    Args:
-        xyzs (tensor): Nx3 or BxNx3.
-    """
-    no_batch_dim = False
-    if xyzs.ndim == 2:
-        xyzs = xyzs[None, ...]
-        no_batch_dim = True
-    normals = estimate_pointcloud_normals(
-        xyzs * 1000.,
-        neighborhood_size=6,
-        disambiguate_directions=False,
-        use_symeig_workaround=True
+    camera = FoVOrthographicCameras(
+        device=device,
+        R=R,
+        T=T,
+        znear=100.0,
+        zfar=-100.0,
+        max_y=100.0,
+        min_y=-100.0,
+        max_x=100.0,
+        min_x=-100.0,
+        scale_xyz=(scale * np.ones(3), ),
     )
-    normals = normals / (
-        torch.linalg.norm(normals, dim=-1, keepdim=True) + 1e-8
-    )
-    return normals
 
-def test_normals(normals):
-    no_batch_dim = True
-    outside_direcion = torch.tensor([0,0,1]).to(device=normals.device)
+    return camera
+
+def init_renderer(cam, device):
+    raster_settings_mesh = RasterizationSettings(
+                image_size=512,
+                blur_radius=np.log(1.0 / 1e-4) * 1e-7,
+                faces_per_pixel=30,
+            )
+    meshRas = MeshRasterizer(cameras=cam, raster_settings=raster_settings_mesh)
+    blendparam = BlendParams(1e-4, 1e-4, (0.0, 0.0, 0.0))
+    renderer = MeshRenderer(
+            rasterizer=meshRas,
+            shader=cleanShader(device=device, cameras=cam, blend_params=blendparam),
+        )
+    return renderer
+
+def project_mesh(render, mesh, calib=None, scale=100.0):
+    if calib is not None:
+        verts_gt = torch.as_tensor(mesh.vertices * scale).float()
+        proj_verts = projection(verts_gt, calib)
+        proj_verts[:, 1] *= -1
+    else:
+        proj_verts = torch.as_tensor(mesh.vertices).float()
+    faces_gt = torch.as_tensor(mesh.faces).long()
+
+    proj_mesh = render.VF2Mesh(proj_verts, faces_gt)
+    return proj_mesh
+
+def get_normal_img(renderer, mesh):
+    rendered_img = (
+        renderer(mesh[0])[0:1, :, :, :3] - 0.5
+    ) * 2.0
+    rendered_img = ((rendered_img + 1.0) * 0.5)[0]
+    return rendered_img
+
+
+def get_pifuhd_calib(calib_path):
+    # loading calibration data
+    param = np.load(calib_path, allow_pickle=True)
+    # pixel unit / world unit is equal to 1
+    # pixel unit / uv unit ---> is ortho_ratio
+    ortho_ratio = param.item().get('ortho_ratio')
+    # world unit / model unit
+    scale = param.item().get('scale')
+
+    # camera center world coordinate
+    center = param.item().get('center')
+    # model rotation
+    R = param.item().get('R')
+    #translate the position of camera into world coordinate origin. 
+    translate = -np.matmul(R, center).reshape(3, 1)
+    extrinsic = np.concatenate([R, translate], axis=1)
+    extrinsic = np.concatenate([extrinsic, np.array([0, 0, 0, 1]).reshape(1, 4)], 0)
+
+    # Match camera space to image pixel space
+    scale_intrinsic = np.identity(4)
+    scale_intrinsic[0, 0] = scale / ortho_ratio
+    #render code, this part flip(axis =0),therefore, y need change
+    scale_intrinsic[1, 1] = -scale / ortho_ratio
+    scale_intrinsic[2, 2] = scale / ortho_ratio
+
+
+    #uv space is [-1,1] we map [-256,255]->[-1,1]
+    # Match image pixel space to image uv space
+    uv_intrinsic = np.identity(4)
+    uv_intrinsic[0, 0] = 1.0 / float(512 // 2)
+    uv_intrinsic[1, 1] = 1.0 / float(512 // 2)
+    uv_intrinsic[2, 2] = 1.0 / float(512 // 2)
+
+    # Transform under image pixel space
+    trans_intrinsic = np.identity(4)
+
+    intrinsic = np.matmul(trans_intrinsic, np.matmul(uv_intrinsic, scale_intrinsic))
+    calib = np.matmul(intrinsic, extrinsic)
     
-    normals = torch.sign(
-        torch.sum(normals * outside_direcion, dim=-1, keepdim=True)) * normals
-    
-    normals = (normals + 1.0) / 2 
-
-    if no_batch_dim:
-        normals = normals[0]
-
-    return normals
-
-import os
-import torch
-import matplotlib.pyplot as plt
-
-# Data structures and functions for rendering
-from pytorch3d.structures import Pointclouds
-from pytorch3d.renderer import (
-    look_at_view_transform,
-    OrthographicCameras,
-    PointsRasterizationSettings,
-    PointsRenderer,
-    PointsRasterizer,
-    AlphaCompositor,
-)
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
-# Setup
-if torch.cuda.is_available():
-    device = torch.device("cuda:0")
-    torch.cuda.set_device(device)
-else:
-    device = torch.device("cpu")
+    calib[:3,:3] /= scale
+    return calib, scale
 
 
-R, T = look_at_view_transform(20, 0, 0)
-cameras = OrthographicCameras(device=device, R=R, T=T)
-raster_settings = PointsRasterizationSettings(
-    image_size=512, 
-    radius = 0.003,
-    points_per_pixel = 10
-)
+# ours (radius=0.005) others render from mesh
 
-rasterizer = PointsRasterizer(cameras=cameras, raster_settings=raster_settings)
-renderer = PointsRenderer(
-    rasterizer=rasterizer,
-    compositor=AlphaCompositor(background_color=(0, 0, 0))
-)
-
-
-import trimesh
-def get_chamfer_distance(gt_pcls, pred_pcls):
-    gt_pcls = torch.from_numpy(gt_pcls).float()
-    pred_pcls = torch.from_numpy(pred_pcls).float()
-    tgt_points = Pointclouds(torch.unsqueeze(gt_pcls,0))
-    pred_points = Pointclouds(torch.unsqueeze(pred_pcls, 0))
-    tgt_points=tgt_points.to(device)
-    pred_points=pred_points.to(device)
-    chamfer_dist = chamfer_distance(tgt_points, pred_points)[0] * 100
-
-    return chamfer_dist.cpu()
-
-def depth_render_result(rndr, path=None):
-    cam_render = rndr.get_color(2)
-    cam_render[:, :, -1] -= 0.5
-    cam_render[:, :, -1] *= 2.0
-    return cam_render
-
-def get_depth_map(vertices, faces, normals, faces_normals, output_path=None, size=512):
-    initialize_GL_context(width=size, height=size, egl=egl)
-
-    cam = Camera(width=size, height=size)
-    ortho_ratio = 1 * (512 / size)
-    cam.ortho_ratio = ortho_ratio
-    cam.near = -1
-    cam.far = 1
-    cam.sanity_check()
-    cam.width = 2
-    cam.height = 2
-
-    dic = {
-        'ortho_ratio': 1,
-        'scale': 1,
-        'center': np.zeros(3),
-        'R' : np.eye(3)
+dataset = 'thuman2'
+# cape 
+if dataset == 'cape':
+    mesh_dir = "/mnt/local4T/pengfei/projects/PointHuman/PointHuman-ICON/data/cape/scans"
+    subject_names = sorted([i.split('.')[0] for i in os.listdir(mesh_dir)])
+    views = [
+        '000', '120', '240'
+    ]
+    calib_dir =  "/mnt/local4T/pengfei/projects/PointHuman/PointHuman-ICON/data/cape_3views/"
+    output_dir = "/mnt/local4T/pengfei/projects/PointHuman/PointHuman-ICON/results"
+    pred_mesh_dir = "/mnt/local4T/pengfei/projects/PointHuman/PointHuman-ICON/results"
+    view2obj = {
+        '000': 'est_mesh_0.obj',
+        '120': 'est_mesh_120.obj',
+        '240': 'est_mesh_240.obj',
     }
-    calib = opengl_util.load_calib(dic, render_size=size)
-    extrinsic = calib[:4, :4]
-    intrinsic = calib[4:8, :4]
-    calib_mat = np.matmul(intrinsic, extrinsic)
-    cam.width = 2
-    cam.height = 2
-    cam.set_projection_matrix(calib_mat[:3,:4])
+elif dataset == 'thuman2':
+    dat_root = "/mnt/local4T/pengfei/projects/PointHuman/PointHuman-ICON/data/thuman2"
+    mesh_dir = os.path.join(dat_root, 'scans')
+    subject_names = sorted([subject.split('/')[-1] for subject in np.loadtxt(os.path.join(dat_root, 'test.txt'), dtype=str).tolist()])
+    # subject_names = sorted([i.split('.')[0] for i in os.listdir(mesh_dir)])
+    views = [
+        f'{i:03d}' for i in range(0,360,10)
+    ]
+    calib_dir =  "/mnt/local4T/pengfei/projects/PointHuman/PointHuman-ICON/data/thuman2_36views/"
+    output_dir = "/mnt/local4T/pengfei/projects/PointHuman/PointHuman-ICON/results"
+    pred_mesh_dir = "/mnt/local4T/pengfei/projects/PointHuman/PointHuman-ICON/results"
+    view2obj={}
+    for view in views:
+        view2obj[view] = f'est_mesh_{int(view)}.obj'
 
-    rndr = ColorRender(width=size, height=size, egl=egl)
-    rndr.set_mesh(
-        vertices, faces, normals, faces_normals
+compare_methods = [
+    # 'pifu',
+    # 'open-pifuhd',
+    # 'pamir',
+    # 'icon-nofilter',
+    # 'icon-filter',
+    'econ',
+    # 'pointhuman_1_outputs',
+]
+print(f"running method:{compare_methods[0]}, dataset: {dataset}")
+
+# mesh normal rendering
+# scale = 100.0
+# camera = get_camera(scale, device)
+# icon_renderer = init_renderer(camera, device)
+# render = Render(size=512, device=device)
+
+radius = 0.005
+calc_mesh_dist = True
+calc_NC = True
+output_normal_map = True
+
+def init_point_renderer(radius, device):
+    R, T = look_at_view_transform(20, 0, 0)
+    cameras = OrthographicCameras(device=device, R=R, T=T)
+    raster_settings = PointsRasterizationSettings(
+        image_size=512, 
+        radius = radius,
+        points_per_pixel = 10
     )
 
-    rndr.set_norm_mat(1, np.zeros(3))
-
-    rndr.set_camera(cam)
-    rndr.display()
-    depth = depth_render_result(rndr, output_path)
-    return depth
-
-def invert_projection(depth):
-
-    mask = depth[:, :, -1] == 1
-    z_ndc = depth[:, :, 0]
-
-    z_ndc = z_ndc[mask]
-    x = np.linspace(-1, 1, 512)
-    y = np.linspace(-1, 1, 512)
-
-    xv, yv = np.meshgrid(x,y)
-    x_ndc = xv[mask]
-    y_ndc = yv[mask]
-
-    y_ndc = -y_ndc
-    z_ndc = -z_ndc
-    
-    pcls = np.stack([x_ndc, y_ndc, z_ndc], axis= -1)
-    pcls_view = pcls
-    return pcls_view
-
-def load_calib(calib_path):
-    calib_data = np.loadtxt(calib_path, dtype=float)
-    extrinsic = calib_data[:4, :4]
-    intrinsic = calib_data[4:8, :4]
-    calib_mat = np.matmul(intrinsic, extrinsic)
-    return calib_mat
-
-def get_proj_pcls(mesh_file, calib_path=None, z_norm=True):
-    vertices, faces, normals, faces_normals, _, _ = load_scan(
-        mesh_file, with_normal=True, with_texture=True
-    )
-    if calib_path is not None:
-        scale = 100.0
-        vertices *= scale
-        calib = load_calib(calib_path)
-        vertices = projection(vertices, calib)
-        vertices[:, 1] *= -1
-    if z_norm:
-        vertices[:, 2] -= vertices[:, 2].mean()
-
-    depth = get_depth_map(vertices, faces, normals, faces_normals)
-    proj_pcl = invert_projection(depth)
-
-    return proj_pcl, vertices, faces
-
-def projection(vertices, calib):
-    vertices = np.matmul(calib[:3, :3], vertices.T).T + calib[:3, 3]
-    
-    return vertices
-
-from typing import Union
-from pytorch3d.loss.chamfer import (
-    _handle_pointcloud_input,
-    _validate_chamfer_reduction_inputs,
-    knn_points
+    point_rasterizer = PointsRasterizer(cameras=cameras, raster_settings=raster_settings)
+    point_renderer = PointsRenderer(
+        rasterizer=point_rasterizer,
+        compositor=AlphaCompositor(background_color=(0, 0, 0))
     )
 
-def chamfer_distance(
-    x,
-    y,
-    x_lengths=None,
-    y_lengths=None,
-    x_normals=None,
-    y_normals=None,
-    weights=None,
-    batch_reduction: Union[str, None] = "mean",
-    point_reduction: str = "mean",
-    norm: int = 2,
-):
-    """
-    Chamfer distance between two pointclouds x and y.
+    return point_renderer
 
-    Args:
-        x: FloatTensor of shape (N, P1, D) or a Pointclouds object representing
-            a batch of point clouds with at most P1 points in each batch element,
-            batch size N and feature dimension D.
-        y: FloatTensor of shape (N, P2, D) or a Pointclouds object representing
-            a batch of point clouds with at most P2 points in each batch element,
-            batch size N and feature dimension D.
-        x_lengths: Optional LongTensor of shape (N,) giving the number of points in each
-            cloud in x.
-        y_lengths: Optional LongTensor of shape (N,) giving the number of points in each
-            cloud in y.
-        x_normals: Optional FloatTensor of shape (N, P1, D).
-        y_normals: Optional FloatTensor of shape (N, P2, D).
-        weights: Optional FloatTensor of shape (N,) giving weights for
-            batch elements for reduction operation.
-        batch_reduction: Reduction operation to apply for the loss across the
-            batch, can be one of ["mean", "sum"] or None.
-        point_reduction: Reduction operation to apply for the loss across the
-            points, can be one of ["mean", "sum"].
-        norm: int indicates the norm used for the distance. Supports 1 for L1 and 2 for L2.
+# point cloud renderer 
+pcls_renderer = init_point_renderer(radius, device)
 
-    Returns:
-        2-element tuple containing
+normalRender = NormalRender()
 
-        - **loss**: Tensor giving the reduced distance between the pointclouds
-          in x and the pointclouds in y.
-        - **loss_normals**: Tensor giving the reduced cosine distance of normals
-          between pointclouds in x and pointclouds in y. Returns None if
-          x_normals and y_normals are None.
-    """
-    _validate_chamfer_reduction_inputs(batch_reduction, point_reduction)
-
-    if not ((norm == 1) or (norm == 2)):
-        raise ValueError("Support for 1 or 2 norm.")
-
-    x, x_lengths, x_normals = _handle_pointcloud_input(x, x_lengths, x_normals)
-    y, y_lengths, y_normals = _handle_pointcloud_input(y, y_lengths, y_normals)
-
-    return_normals = x_normals is not None and y_normals is not None
-
-    N, P1, D = x.shape
-    P2 = y.shape[1]
-
-    # Check if inputs are heterogeneous and create a lengths mask.
-    is_x_heterogeneous = (x_lengths != P1).any()
-    is_y_heterogeneous = (y_lengths != P2).any()
-    x_mask = (
-        torch.arange(P1, device=x.device)[None] >= x_lengths[:, None]
-    )  # shape [N, P1]
-    y_mask = (
-        torch.arange(P2, device=y.device)[None] >= y_lengths[:, None]
-    )  # shape [N, P2]
-
-    if y.shape[0] != N or y.shape[2] != D:
-        raise ValueError("y does not have the correct shape.")
-    if weights is not None:
-        if weights.size(0) != N:
-            raise ValueError("weights must be of shape (N,).")
-        if not (weights >= 0).all():
-            raise ValueError("weights cannot be negative.")
-        if weights.sum() == 0.0:
-            weights = weights.view(N, 1)
-            if batch_reduction in ["mean", "sum"]:
-                return (
-                    (x.sum((1, 2)) * weights).sum() * 0.0,
-                    (x.sum((1, 2)) * weights).sum() * 0.0,
-                )
-            return ((x.sum((1, 2)) * weights) * 0.0, (x.sum((1, 2)) * weights) * 0.0)
-
-    cham_norm_x = x.new_zeros(())
-    cham_norm_y = x.new_zeros(())
-
-    x_nn = knn_points(x, y, lengths1=x_lengths, lengths2=y_lengths, norm=norm, K=1)
-    y_nn = knn_points(y, x, lengths1=y_lengths, lengths2=x_lengths, norm=norm, K=1)
-    cham_x = x_nn.dists[..., 0]  # (N, P1)
-    cham_y = y_nn.dists[..., 0]  # (N, P2)
-    cham_x = torch.sqrt(cham_x)
-    cham_y = torch.sqrt(cham_y)
-    if is_x_heterogeneous:
-        cham_x[x_mask] = 0.0
-    if is_y_heterogeneous:
-        cham_y[y_mask] = 0.0
-
-    if weights is not None:
-        cham_x *= weights.view(N, 1)
-        cham_y *= weights.view(N, 1)
-
-    # Apply point reduction
-    cham_x = cham_x.sum(1)  # (N,)
-    cham_y = cham_y.sum(1)  # (N,)
-
-    if point_reduction == "mean":
-        x_lengths_clamped = x_lengths.clamp(min=1)
-        y_lengths_clamped = y_lengths.clamp(min=1)
-        cham_x /= x_lengths_clamped
-        cham_y /= y_lengths_clamped
-        if return_normals:
-            cham_norm_x /= x_lengths_clamped
-            cham_norm_y /= y_lengths_clamped
-
-    if batch_reduction is not None:
-        # batch_reduction == "sum"
-        cham_x = cham_x.sum()
-        cham_y = cham_y.sum()
-        if return_normals:
-            cham_norm_x = cham_norm_x.sum()
-            cham_norm_y = cham_norm_y.sum()
-        if batch_reduction == "mean":
-            div = weights.sum() if weights is not None else max(N, 1)
-            cham_x /= div
-            cham_y /= div
-            if return_normals:
-                cham_norm_x /= div
-                cham_norm_y /= div
-
-    cham_dist = cham_x + cham_y
-    cham_normals = cham_norm_x + cham_norm_y if return_normals else None
-
-    return cham_dist, cham_normals
-
-from pytorch3d.loss.point_mesh_distance import _PointFaceDistance
-def point_mesh_distance(meshes, pcls):
-    # source code of pytorch3D.loss.point_mesh_face_distance
-    
-    if len(meshes) != len(pcls):
-        raise ValueError("meshes and pointclouds must be equal sized batches")
-    N = len(meshes)
-
-    # packed representation for pointclouds
-    points = pcls.points_packed()    # (P, 3)
-    points_first_idx = pcls.cloud_to_packed_first_idx()
-    max_points = pcls.num_points_per_cloud().max().item()
-
-    # packed representation for faces
-    verts_packed = meshes.verts_packed() # (sum(V_n), 3)
-    faces_packed = meshes.faces_packed() # (sum(F_n), 3)
-    tris = verts_packed[faces_packed]    # (T, 3, 3)
-    tris_first_idx = meshes.mesh_to_faces_packed_first_idx()
-
-    # point to face distance: shape (P,)
-    point_to_face = _PointFaceDistance.apply(
-        points, points_first_idx, tris, tris_first_idx, max_points, 5e-3
-    )
-
-    # weight each example by the inverse of number of points in the example
-    point_to_cloud_idx = pcls.packed_to_cloud_idx()    # (sum(P_i),)
-    num_points_per_cloud = pcls.num_points_per_cloud()    # (N,)
-    weights_p = num_points_per_cloud.gather(0, point_to_cloud_idx)
-    weights_p = 1.0 / weights_p.float()
-    point_to_face = torch.sqrt(point_to_face) * weights_p
-    point_dist = point_to_face.sum() / N
-
-    return point_dist
-
-def get_p2s_distance(vertices, faces, pcls):
-    from lib.common.render import Render
-    render = Render(size=512, device=device)
-    mesh = render.VF2Mesh(vertices, faces)
-    pcls = torch.from_numpy(pcls).float()
-    # for single pcl
-    pcl = Pointclouds(torch.unsqueeze(pcls, 0))
-    pcl = pcl.to(device)
-    p2s_dist = point_mesh_distance(mesh, pcl) * 100
-    return p2s_dist
-
-def calc_metrics(gt_mesh_path, pred_mesh_path, calib_path, z_norm=True):
-    gt_pcl, gt_vertices, gt_faces = get_proj_pcls(gt_mesh_path, calib_path, z_norm)
-    pred_pcl, pred_vertices, pred_faces = get_proj_pcls(pred_mesh_path,z_norm=z_norm)
-    
-    # proj point clouds chamfer
-    chamfer_dist = get_chamfer_distance(gt_pcl, pred_pcl)
-    
-    # P2S (proj pcls to gt mesh)
-    p2s_dist = get_p2s_distance(gt_vertices, gt_faces, pred_pcl)
-    return chamfer_dist, p2s_dist
-
-
-import trimesh
-def export_obj(vertices, faces, out_path, vertiex_colors=None):
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    trimesh.Trimesh(vertices, faces, vertex_colors=vertiex_colors).export(out_path)
-
-from pytorch3d.structures import Pointclouds
-from pytorch3d.ops import sample_points_from_meshes
-from lib.common.render import Render
-
-def get_icon_chamfer(tgt_mesh, pred_mesh, num_sample_points=40000):
-    tgt_points = Pointclouds(sample_points_from_meshes(tgt_mesh, num_sample_points))
-    pred_points = Pointclouds(sample_points_from_meshes(pred_mesh, num_sample_points))
-    invert_p2s = point_mesh_distance(tgt_mesh, pred_points) * 100 
-    p2s_dist = point_mesh_distance(pred_mesh, tgt_points) * 100 
-    chamfer_dist = (invert_p2s + p2s_dist) / 2
-    # chamfer_dist = pytorch3d.loss.chamfer_distance(tgt_points, pred_points)[0] * 100
-    return p2s_dist, chamfer_dist
-
-import os
-import torch
-import matplotlib.pyplot as plt
-
-# Data structures and functions for rendering
-from pytorch3d.structures import Pointclouds
-from pytorch3d.renderer import (
-    look_at_view_transform,
-    OrthographicCameras,
-    PointsRasterizationSettings,
-    PointsRenderer,
-    PointsRasterizer,
-    AlphaCompositor,
-)
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
-# Setup
-if torch.cuda.is_available():
-    device = torch.device("cuda:0")
-    torch.cuda.set_device(device)
-else:
-    device = torch.device("cpu")
-
-
-R, T = look_at_view_transform(20, 0, 0)
-cameras = OrthographicCameras(device=device, R=R, T=T)
-raster_settings = PointsRasterizationSettings(
-    image_size=512, 
-    radius = 0.003,
-    points_per_pixel = 10
-)
-
-rasterizer = PointsRasterizer(cameras=cameras, raster_settings=raster_settings)
-renderer = PointsRenderer(
-    rasterizer=rasterizer,
-    compositor=AlphaCompositor(background_color=(0, 0, 0))
-)
-
-def get_pcls_normal_map(renderer, pcl):
-    pcl_tensor = torch.from_numpy(pcl).float().to(device)
-    normals = estimate_normals(pcl_tensor)
-    normals = test_normals(normals)
-    verts = pcl_tensor.to(device)
-    rgb = normals.to(device)
-    gt_pcls = Pointclouds(points=[verts], features=[rgb])
-    images = renderer(gt_pcls)
-    return images
-
-# load calib file 
-calib_paths = {
-    '000': [],
-    '120': [],
-    '240': []
-}
-
-for path in subject_paths:
-    for key in calib_paths.keys():
-        calib_path = os.path.join(path, f'calib/{key}.txt')
-        calib_paths[key].append(calib_path)
-
-
-
-# calc chamfer score and p2s score 
-import matplotlib.pyplot as plt
-from tqdm import tqdm 
 score = []
-z_norm = False
-print(f"enable z_norm:{z_norm}")
-for calib_key, pred_key in tqdm(zip(calib_paths.keys(), pred_paths.keys())):
-    calib_path_list = calib_paths[calib_key]
-    pred_path_list = pred_paths[pred_key]
-    for gt, pred, calib in tqdm(zip(gt_scan_paths, pred_path_list, calib_path_list)):
-        gt_subject_name = os.path.basename(gt)[:-4]
-        pred_subject_name = pred.split('/')[-2]
-        calib_subject_name = calib.split('/')[-3]
-        if gt_subject_name == pred_subject_name and pred_subject_name == calib_subject_name:
+from tqdm import tqdm
+for subject_name in tqdm(subject_names):
+    mesh_path = os.path.join(mesh_dir, subject_name, f"{subject_name}.obj")
+    # mesh = trimesh.load(mesh_path)
+    for view in tqdm(views):
+        calib_path = os.path.join(calib_dir, subject_name, "calib", f'{view}.txt')
+        calib = load_calib(calib_path)
+        if calc_NC:
+            # to ndc 
+            # gt_mesh = project_mesh(render, mesh, calib, scale)
+            # gt_normal_imgs = get_normal_img(icon_renderer, gt_mesh)
 
-            gt_pcl, gt_vertices, gt_faces = get_proj_pcls(gt, calib, z_norm)
-            pred_pcl, pred_vertices, pred_faces = get_proj_pcls(pred, z_norm=z_norm)
-            chamfer_dist = get_chamfer_distance(gt_pcl, pred_pcl)
+            gt_pcl, _, _ = normalRender.get_proj_pcls(mesh_path, calib)
+            gt_normal_imgs = get_pcls_normal_map(pcls_renderer, gt_pcl)
 
-            # # P2S (proj pcls to gt mesh)
-            p2s_dist = get_p2s_distance(gt_vertices, gt_faces, pred_pcl)
-            gt_images = get_pcls_normal_map(renderer, gt_pcl)
-            pred_images = get_pcls_normal_map(renderer, pred_pcl)
-            normal_score = ((gt_images[0, ..., :3] - pred_images[0, ..., :3]) ** 2).sum(-1).mean()
-            tmp_dict = {
-                'subject_name': gt_subject_name,
-                'angle': calib_key,
-                'chamfer': chamfer_dist.cpu().numpy(),
-                'p2s': p2s_dist.cpu().numpy(),
-                'normal_mse': normal_score.cpu().numpy(),
-            }
-            score.append(tmp_dict)
-            # score[gt_subject_name] = tmp_dict
+        # for chamfer and p2s
+        if calc_mesh_dist:
+            gt_pcl, gt_vertices, gt_faces = normalRender.get_proj_pcls(mesh_path, calib)
+
+        tmp_dict = {}
+        tmp_dict['subject_name'] = subject_name
+        tmp_dict['view'] = view
+        for method in compare_methods:
+            if 'pointhuman' not in method:
+                pred_mesh_path = os.path.join(pred_mesh_dir, method, f'{dataset}/{subject_name}/{view2obj[view]}')
+                if 'econ' == method:
+                    pred_mesh_path = os.path.join(pred_mesh_dir, method, f'{dataset}/{subject_name}/{dataset}-{subject_name}-{int(view):03d}_final.obj')
+                
+                if 'open-pifuhd' == method:
+                    pred_mesh_path = os.path.join(pred_mesh_dir, method, f'{dataset}/{subject_name}/est_mesh_{view}.obj')
+
+
+                if calc_NC:
+                    # render normal from pointclouds
+                    pred_pcl, _, _ = normalRender.get_proj_pcls(pred_mesh_path)
+                    pred_normal_imgs = get_pcls_normal_map(pcls_renderer, pred_pcl)
+                    normal_img_output = os.path.join(pred_mesh_dir, method, f'normal_map/from_pointcloud/{dataset}/{view}')
+
+                    # render normal from mesh 
+                    # pred_mesh = trimesh.load(pred_mesh_path)
+                    # pred_mesh = project_mesh(render, pred_mesh, calib=None)
+                    # pred_normal_imgs = get_normal_img(icon_renderer, pred_mesh)
+                    # normal_img_output = os.path.join(pred_mesh_dir, method, f'normal_map_from_mesh/{view}')
+                
+                if calc_mesh_dist:
+                    pred_pcl, _, _ = normalRender.get_proj_pcls(pred_mesh_path)
+                    # trimesh.Trimesh(gt_pcl).export(f'{method}_pred_proj.obj')
+            else:
+                pred_mesh_path = os.path.join(pred_mesh_dir, method, f'{dataset}/{subject_name}/{view}/est_scan.obj')
+                if calc_NC:
+                    pred_pcl, _, _ = normalRender.get_ori_pcls(pred_mesh_path, calib_path, z_norm=False)
+                    pred_normal_imgs = get_pcls_normal_map(pcls_renderer, pred_pcl)
+                    normal_img_output = os.path.join(pred_mesh_dir, method, f'normal_map/from_pointcloud/{dataset}/{view}')
+            
+            if calc_NC:
+                error = (((pred_normal_imgs - gt_normal_imgs)**2).sum(dim=2).mean())
+                tmp_dict[f'{method}_nc']=error.cpu().numpy()
+            
+            if output_normal_map:
+                if not os.path.exists(normal_img_output):
+                    os.makedirs(normal_img_output)
+                Image.fromarray(
+                    (
+                        np.concatenate(
+                            (gt_normal_imgs.cpu().numpy(), pred_normal_imgs.cpu().numpy()
+                        ), axis=1) * 255.0
+                    ).astype(np.uint8)
+                ).save(os.path.join(normal_img_output, f'{subject_name}.jpg'))
+            if calc_mesh_dist :
+                chamfer_dist = get_chamfer_distance(gt_pcl, pred_pcl).cpu().numpy()
+                p2s_dist = get_p2s_distance(gt_vertices, gt_faces, pred_pcl).cpu().numpy()
+                tmp_dict[f'{method}_chamfer'] = chamfer_dist
+                tmp_dict[f'{method}_p2s'] = p2s_dist
+        score.append(tmp_dict)
         # break
     # break
+    
+output_root = f"/mnt/local4T/pengfei/projects/PointHuman/PointHuman-ICON/results/{compare_methods[0]}"
+os.makedirs(output_root, exist_ok=True)
+npy_path = os.path.join(output_root, f'MESH_{dataset}_{compare_methods[0]}.npy')
+np.save(npy_path, score, allow_pickle=True)
+import pandas as pd 
+df = pd.DataFrame(score)
+tmp_dict = {}
 
-np.save('cape_score_wo_norm.npy', score, allow_pickle=True)
+if dataset == "cape":
+    split_path = "/mnt/local4T/pengfei/projects/PointHuman/PointHuman-ICON/data/cape/test150.txt"
+    data = []
+    with open(split_path, 'r', encoding='utf-8') as f:
+        for ann in f.readlines():
+            ann = ann.strip('\n')       #去除文本中的换行符
+            ann = ann.split('/')[1]
+            data.append(ann)
+    simple_subject_name = data[:50]
+    hard_subject_name = data[50:]
 
-print(len(score))
+    easy_df = df.loc[df['subject_name'].isin(simple_subject_name)]
+    hard_df = df.loc[df['subject_name'].isin(hard_subject_name)]
+
+    print(f"easy objs num:{len(easy_df)}, hard objs num:{len(hard_df)}")
+
+
+    calc_mesh_dist = True
+    for method in compare_methods:
+        if calc_mesh_dist and calc_NC:
+            tmp_dict[method] = {
+                'nc_easy': easy_df[f'{method}_nc'].mean(),
+                'nc_hard': hard_df[f'{method}_nc'].mean(),
+                'chamfer_easy': easy_df[f'{method}_chamfer'].mean(),
+                'chamfer_hard': hard_df[f'{method}_chamfer'].mean(),
+                'p2s_easy': easy_df[f'{method}_p2s'].mean(),
+                'p2s_hard': hard_df[f'{method}_p2s'].mean(),
+            }
+        elif calc_NC:
+            tmp_dict[method] = {
+                'nc_easy': easy_df[f'{method}_nc'].mean(),
+                'nc_hard': hard_df[f'{method}_nc'].mean(),
+            }
+        else: 
+            tmp_dict[method] = {
+                'chamfer_easy': easy_df[f'{method}_chamfer'].mean(),
+                'chamfer_hard': hard_df[f'{method}_chamfer'].mean(),
+                'p2s_easy': easy_df[f'{method}_p2s'].mean(),
+                'p2s_hard': hard_df[f'{method}_p2s'].mean(),
+            }
+elif dataset == "thuman2":
+    for method in compare_methods:
+        if calc_mesh_dist and calc_NC:
+            tmp_dict[method] = {
+                'nc': df[f'{method}_nc'].mean(),
+                'chamfer': df[f'{method}_chamfer'].mean(),
+                'p2s': df[f'{method}_p2s'].mean(),
+            }
+        elif calc_NC:
+            tmp_dict[method] = {
+                'nc': df[f'{method}_nc'].mean(),
+            }
+        else: 
+            tmp_dict[method] = {
+                'chamfer': df[f'{method}_chamfer'].mean(),
+                'p2s': df[f'{method}_p2s'].mean(),
+            }
+
+import json
+with open(f"{os.path.join(output_root, f'MESH_{dataset}_{compare_methods[0]}.json')}", 'w') as fp:
+    fp.write(json.dumps(tmp_dict, indent=4))
+    

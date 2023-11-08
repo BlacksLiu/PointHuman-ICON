@@ -82,6 +82,7 @@ def load_networks(cfg, model, mlp_path, normal_path):
     model_dict = model.state_dict()
     main_dict = {}
     normal_dict = {}
+    coarse_dict = {}
 
     # MLP part loading
     if os.path.exists(mlp_path) and mlp_path.endswith("ckpt"):
@@ -94,6 +95,23 @@ def load_networks(cfg, model, mlp_path, normal_path):
             ("reconEngine" not in k) and ("normal_filter" not in k) and ("voxelization" not in k)
         }
         print(colored(f"Resume MLP weights from {mlp_path}", "green"))
+
+    # coarse pifuhd loading 
+    if cfg.net.prior_type == 'pifuhd_fine':
+        if os.path.exists(cfg.coarse.resume_path) and cfg.coarse.resume_path.endswith("ckpt"):
+            coarse_dict = torch.load(cfg.coarse.resume_path,
+                                map_location=torch.device(f"cuda:{cfg.gpus[0]}"))["state_dict"]
+
+            for key in normal_dict.keys():
+                coarse_dict = rename(coarse_dict, key, key.replace("netG.F_filter", "netG.F_filter_coarse"))
+                coarse_dict = rename(coarse_dict, key, key.replace("netG.if_regressor", "netG.if_regressor_coarse"))
+            
+            coarse_dict = {
+                k: v
+                for k, v in coarse_dict.items() if k in model_dict and v.shape == model_dict[k].shape and
+                ("reconEngine" not in k) and ("normal_filter" not in k) and ("voxelization" not in k)
+            }
+            print(colored(f"Resume coarse MLP weights from {cfg.coarse.resume_path}", "green"))
 
     # normal network part loading
     if os.path.exists(normal_path) and normal_path.endswith("ckpt"):
@@ -111,6 +129,7 @@ def load_networks(cfg, model, mlp_path, normal_path):
 
     model_dict.update(main_dict)
     model_dict.update(normal_dict)
+    model_dict.update(coarse_dict)
     model.load_state_dict(model_dict)
 
     # clean unused GPU memory
@@ -396,7 +415,8 @@ def calc_error_color(opt, netG, netC, cuda, dataset, num_tests):
 # pytorch lightning training related fucntions
 
 
-def query_func(opt, netG, features, points, proj_matrix=None):
+def query_func(opt, netG, features, points, 
+                proj_matrix=None, global_features=None):
     '''
         - points: size of (bz, N, 3)
         - proj_matrix: size of (bz, 4, 4)
@@ -413,7 +433,8 @@ def query_func(opt, netG, features, points, proj_matrix=None):
     calib_tensor = torch.stack([torch.eye(4).float()], dim=0).type_as(samples)
 
     preds = netG.query(
-        features=features, points=samples, calibs=calib_tensor, regressor=netG.if_regressor
+        features=features, points=samples, calibs=calib_tensor,
+        regressor=netG.if_regressor, global_feat = global_features
     )
 
     if type(preds) is list:

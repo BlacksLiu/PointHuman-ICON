@@ -141,7 +141,7 @@ def render_subject(subject, dataset, save_folder, rotation, size, render_types, 
 
         for y in range(0, 360, 360 // rotation):
 
-            cam.near = 0.05
+            cam.near = 0.1
             cam.far = 100.
             cam.sanity_check()
 
@@ -160,7 +160,8 @@ def render_subject(subject, dataset, save_folder, rotation, size, render_types, 
                 'scale': scan_scale, 
                 'center': vmed, 
                 'R': R,
-                "camera_center": cam.center
+                "camera_center": cam.center,
+                "fov": cam.fov
             }
 
             if "light" in render_types:
@@ -263,6 +264,7 @@ if __name__ == "__main__":
     else:
         random.shuffle(subjects)
         render_types = ["light", "normal", "position"]
+        # render_types = ["normal", "position"]
         # render_types = ["depth"]
 
     print(f"Rendering types: {render_types}")

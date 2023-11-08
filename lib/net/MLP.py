@@ -6,7 +6,7 @@ import pytorch_lightning as pl
 
 
 class MLP(pl.LightningModule):
-    def __init__(self, filter_channels, name=None, res_layers=[], norm='group', last_op=None):
+    def __init__(self, filter_channels, name=None, res_layers=[], norm='group', last_op=None, merge_layer=0):
 
         super(MLP, self).__init__()
 
@@ -17,6 +17,7 @@ class MLP(pl.LightningModule):
         self.last_op = last_op
         self.name = name
         self.activate = nn.LeakyReLU(inplace=True)
+        self.merge_layer = merge_layer if merge_layer > 0 else len(filter_channels) // 2
 
         for l in range(0, len(filter_channels) - 1):
             if l in self.res_layers:
@@ -48,7 +49,7 @@ class MLP(pl.LightningModule):
         '''
         y = feature
         tmpy = feature
-
+        phi = None
         for i, f in enumerate(self.filters):
 
             y = f(y if i not in self.res_layers else torch.cat([y, tmpy], 1))
@@ -58,7 +59,10 @@ class MLP(pl.LightningModule):
                 else:
                     y = self.activate(self.norms[i](y))
 
+            if i == self.merge_layer:
+                phi = y.clone()
+
         if self.last_op is not None:
             y = self.last_op(y)
 
-        return y
+        return y, phi

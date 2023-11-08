@@ -91,6 +91,7 @@ _C.net.num_hourglass = 2
 _C.net.hourglass_dim = 256
 _C.net.voxel_dim = 32
 _C.net.resnet_dim = 120
+_C.net.merge_layer = 2
 _C.net.mlp_dim = [320, 1024, 512, 256, 128, 1]
 _C.net.mlp_dim_knn = [320, 1024, 512, 256, 128, 3]
 _C.net.mlp_dim_color = [513, 1024, 512, 256, 128, 3]
@@ -122,6 +123,65 @@ _C.net.use_PE = False
 _C.net.use_IGR = False
 _C.net.in_geo = ()
 _C.net.in_nml = ()
+
+# config for pifuhd_fine coarse part (only use in pifuhd_fine)
+_C.coarse = CN()
+_C.coarse.resume_path = ''
+
+_C.coarse.net = CN()
+_C.coarse.net.gtype = 'HGPIFuNet'
+_C.coarse.net.ctype = 'resnet18'
+_C.coarse.net.classifierIMF = 'MultiSegClassifier'
+_C.coarse.net.netIMF = 'resnet18'
+_C.coarse.net.norm = 'group'
+_C.coarse.net.norm_mlp = 'group'
+_C.coarse.net.norm_color = 'group'
+_C.coarse.net.hg_down = 'ave_pool'
+_C.coarse.net.num_views = 1
+
+# kernel_size, stride, dilation, padding
+
+_C.coarse.net.conv1 = [7, 2, 1, 3]
+_C.coarse.net.conv3x3 = [3, 1, 1, 1]
+
+_C.coarse.net.num_stack = 4
+_C.coarse.net.num_hourglass = 2
+_C.coarse.net.hourglass_dim = 256
+_C.coarse.net.voxel_dim = 32
+_C.coarse.net.resnet_dim = 120
+_C.coarse.net.merge_layer = 2
+_C.coarse.net.mlp_dim = [320, 1024, 512, 256, 128, 1]
+_C.coarse.net.mlp_dim_knn = [320, 1024, 512, 256, 128, 3]
+_C.coarse.net.mlp_dim_color = [513, 1024, 512, 256, 128, 3]
+_C.coarse.net.mlp_dim_multiseg = [1088, 2048, 1024, 500]
+_C.coarse.net.res_layers = [2, 3, 4]
+_C.coarse.net.filter_dim = 256
+_C.coarse.net.smpl_dim = 3
+
+_C.coarse.net.cly_dim = 3
+_C.coarse.net.soft_dim = 64
+_C.coarse.net.z_size = 200.0
+_C.coarse.net.N_freqs = 10
+_C.coarse.net.geo_w = 0.1
+_C.coarse.net.norm_w = 0.1
+_C.coarse.net.dc_w = 0.1
+_C.coarse.net.C_cat_to_G = False
+
+_C.coarse.net.skip_hourglass = True
+_C.coarse.net.use_tanh = True
+_C.coarse.net.soft_onehot = True
+_C.coarse.net.no_residual = True
+_C.coarse.net.use_attention = False
+
+_C.coarse.net.prior_type = "sdf"
+_C.coarse.net.smpl_feats = ['sdf', 'cmap', 'norm', 'vis']
+_C.coarse.net.use_filter = True
+_C.coarse.net.use_cc = False
+_C.coarse.net.use_PE = False
+_C.coarse.net.use_IGR = False
+_C.coarse.net.in_geo = ()
+_C.coarse.net.in_nml = ()
+
 
 _C.dataset = CN()
 _C.dataset.root = ''

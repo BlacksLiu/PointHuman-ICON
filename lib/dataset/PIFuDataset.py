@@ -39,7 +39,7 @@ cape_gender = {
 
 class PIFuDataset():
     def __init__(self, cfg, split='train', vis=False):
-
+        self.crop_windows_size = 512
         self.split = split
         self.root = cfg.root
         self.bsize = cfg.batch_size
@@ -92,8 +92,11 @@ class PIFuDataset():
 
         if self.split == 'train':
             self.rotations = np.arange(0, 360, 360 / self.opt.rotation_num).astype(np.int32)
-        else:
+        elif self.split == 'val':
             self.rotations = range(0, 360, 120)
+        else:
+            self.rotations = np.arange(0, 360, 360 / self.opt.rotation_num).astype(np.int32)
+            # self.rotations = range(0, 360, 120)
 
         self.datasets_dict = {}
 
@@ -269,6 +272,8 @@ class PIFuDataset():
         data_dict.update(
             self.get_sampling_geo(data_dict, is_valid=self.split == "val", is_sdf=self.use_sdf)
         )
+
+        
         data_dict.update(self.load_smpl(data_dict, self.vis))
 
         if self.prior_type == 'pamir':
@@ -285,6 +290,14 @@ class PIFuDataset():
         path_keys = [key for key in data_dict.keys() if '_path' in key or '_dir' in key]
         for key in path_keys:
             del data_dict[key]
+
+        if self.prior_type == "pifuhd_fine" :
+            if self.split == "train":
+                # add crop img and crop sample
+                data_dict.update(self.__crop_sample_relative_coordinate(data_dict))
+                data_dict.update(self.__crop_windows(data_dict))
+            else:
+                data_dict.update(self.__test_input(data_dict))
 
         return data_dict
 
@@ -558,14 +571,136 @@ class PIFuDataset():
             'pad_f_num': pad_f_num
         }
 
+
+    def __sample_rect(self, sample_points, calib):
+        '''sample rect using for fine-PIFu in PIFuhd 
+
+        Parameters:
+            sample_points: points we sample from mesh
+            sample_inside: labels of points indicates whether inside or ouside mesh
+            trans: trans matrix using for project sample points into image 
+            rot: rotation matrix using for project sample points into image
+            range of value [-1,1]
+        return:
+            crop sample points, sample labels, random points, random labels and rect(w0,h0,w1,h1)
+        '''
+        def map(sample_points,trans,rot):            
+            samples = sample_points.T
+            samples = torch.Tensor(samples).float()
+            pts = torch.addmm(trans, rot, samples).T.numpy()
+            x = pts[...,0]
+            y = pts[...,1]
+            return x,y
+        
+        rot = calib[..., :3, :3]
+        trans = calib[..., :3, 3]
+        x_0,y_0 = -np.random.rand(),-np.random.rand()
+        x_1,y_1 = x_0+1,y_0+1
+
+        s_x,s_y = map(sample_points,trans,rot)
+        s_mask = (s_x>x_0) & (s_x<x_1)&(s_y>y_0)&(s_y<y_1)
+
+        return s_mask, [x_0,y_0,x_1,y_1]
+
+    def __crop_sample_relative_coordinate(self,res):
+        '''computing relative coordinate of sample points
+
+        Parameters:
+            res: data parameters
+        
+        return:
+           relative coordinate about sample points 
+        '''
+        samples = res['samples_geo']
+        rect = res['rect']
+        rot = res['calib'][0,:3, :3]
+        trans = res['calib'][0,:3, 3:4]
+        
+        inside_pts = torch.addmm(trans, rot, samples).T
+
+        pts = inside_pts[...,:2]
+        pts[...,0]-=rect[0]
+        pts[...,1]-=rect[1]
+        pts = (pts*2-1)
+        return {'crop_pts': pts.T}
+
+    def __crop_windows(self,data):
+        '''crop windows for fine pifu, in training phase
+
+        Parameters:
+            data: training data, which has some keys e.g.
+                img, front_normal, back_normal, mask, back_mask, rect, etc.
+        
+        return 
+            data: it includes img,front_normal, back_normal which are resized according to self.crop_window_size.
+                More importantly, it need add it crop_img, crop_front_normal and crop_back_normal cropped by key 'rect'
+        '''
+        img = data['image']
+        front_normal = data['normal_F']
+        back_normal = data['normal_B']
+        
+        rect = np.asarray(data['rect'])
+        rect = (rect+1)*self.crop_windows_size
+        rect = np.asarray(rect,np.int)
+        x0,y0,x1,y1 = rect
+
+
+        crop_img = img[...,y0:y1,x0:x1]
+        crop_front_normal = front_normal[...,y0:y1,x0:x1]
+        crop_back_normal = back_normal[...,y0:y1,x0:x1]
+
+
+        #downsample input image (input for coarse)
+        image = F.interpolate(img,(self.crop_windows_size,self.crop_windows_size),mode='bilinear', align_corners=True)
+        front_normal = F.interpolate(front_normal,(self.crop_windows_size,self.crop_windows_size),mode='bilinear', align_corners=True)
+        back_normal = F.interpolate(back_normal,(self.crop_windows_size,self.crop_windows_size),mode='bilinear', align_corners=True)
+
+        return {
+            'crop_img': crop_img,
+            'crop_front_normal': crop_front_normal,
+            'crop_back_normal': crop_back_normal,
+            'image': image,
+            'front_normal': front_normal,
+            'back_normal': back_normal,
+        }
+
+    def __test_input(self, data):
+        img = data['image']
+        front_normal = data['normal_F']
+        back_normal = data['normal_B']
+
+        image_512 = F.interpolate(img,(self.crop_windows_size,self.crop_windows_size),mode='bilinear', align_corners=True)
+        front_normal_512 = F.interpolate(front_normal,(self.crop_windows_size,self.crop_windows_size),mode='bilinear', align_corners=True)
+        back_normal_512 = F.interpolate(back_normal,(self.crop_windows_size,self.crop_windows_size),mode='bilinear', align_corners=True)
+
+
+        return {
+            'crop_img': img,
+            'crop_front_normal': front_normal,
+            'crop_back_normal': back_normal,
+            'image': image_512,
+            'front_normal': front_normal_512,
+            'back_normal': back_normal_512,
+        }
+
     def get_sampling_geo(self, data_dict, is_valid=False, is_sdf=False):
 
         mesh = data_dict['mesh']
         calib = data_dict['calib']
 
+
         # Samples are around the true surface with an offset
         n_samples_surface = 4 * self.opt.num_sample_geo
         vert_ids = np.arange(mesh.verts.shape[0])
+
+        if self.prior_type == "pifuhd_fine" and self.split == "train":
+            # crop sample points for fine part's training
+            # select crop vert_ids
+            print(calib.shape)
+            print(len(vert_ids))
+            crop_mask, rect = self.__sample_rect(mesh.verts, calib)
+            vert_ids = vert_ids[crop_mask]
+            print(len(vert_ids))
 
         samples_surface_ids = np.random.choice(vert_ids, n_samples_surface, replace=True)
 
@@ -578,7 +713,15 @@ class PIFuDataset():
         # Uniform samples in [-1, 1]
         calib_inv = np.linalg.inv(calib)
         n_samples_space = self.opt.num_sample_geo // 4
-        samples_space_img = 2.0 * np.random.rand(n_samples_space, 3) - 1.0
+
+        if self.prior_type == "pifuhd_fine" and self.split == "train":
+            samples_space_img = np.random.rand(n_samples_space, 3)
+            # transform to rect
+            samples_space_img[:, 0] = (rect[2]-rect[0]) * samples_space_img[:, 0] + rect[0]
+            samples_space_img[:, 1] = (rect[3]-rect[1]) * samples_space_img[:, 1] + rect[1]
+        else:
+            samples_space_img = 2.0 * np.random.rand(n_samples_space, 3) - 1.0
+
         samples_space = projection(samples_space_img, calib_inv)
 
         samples = np.concatenate([samples_surface, samples_space], 0)
@@ -606,8 +749,11 @@ class PIFuDataset():
         samples = torch.from_numpy(samples).float()
         labels = torch.from_numpy(labels).float()
 
-        return {'samples_geo': samples, 'labels_geo': labels}
-
+        if self.prior_type == "pifuhd_fine" and self.split == "train":
+            return {'samples_geo': samples, 'labels_geo': labels, 'rect': rect}
+        else:
+            return {'samples_geo': samples, 'labels_geo': labels}
+        
     def visualize_sampling3D(self, data_dict, mode='vis'):
 
         # create plot

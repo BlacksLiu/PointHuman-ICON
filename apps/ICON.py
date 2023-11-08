@@ -69,6 +69,8 @@ class ICON(pl.LightningModule):
         self.keypoint_keys = self.base_keys + [f"smpl_{feat_name}" for feat_name in self.feat_names]
         self.pamir_keys = ["voxel_verts", "voxel_faces", "pad_v_num", "pad_f_num"]
         self.pifu_keys = []
+        self.pifuhd_coarse_keys = []
+        self.pifuhd_fine_keys = ['crop_img', 'crop_front_normal', 'crop_back_normal', 'crop_pts']
 
         self.reconEngine = Seg3dLossless(
             query_func=query_func,
@@ -166,6 +168,11 @@ class ICON(pl.LightningModule):
             export_cfg(self.logger, self.cfg)
 
         self.netG.train()
+        
+        # fix coarse params
+        if self.prior_type == "pifuhd_fine":
+            self.netG.F_filter_coarse.eval()
+            self.netG.if_regressor_coarse.eval()
 
         in_tensor_dict = {
             "sample": batch["samples_geo"].permute(0, 2, 1),
@@ -528,9 +535,16 @@ class ICON(pl.LightningModule):
             in_tensor_dict.update({'T_normal_F': T_normal_F, 'T_normal_B': T_noraml_B})
 
         with torch.no_grad():
+            # add global feature
+            if self.prior_type == "pifuhd_fine":
+                features_global = self.netG.filter_global(in_tensor_dict)
+            else:
+                features_global = None
+
             features, inter = self.netG.filter(in_tensor_dict, return_inter=True)
             sdf = self.reconEngine(
-                opt=self.cfg, netG=self.netG, features=features, proj_matrix=None
+                opt=self.cfg, netG=self.netG, features=features, proj_matrix=None,
+                global_features = features_global 
             )
 
         def tensor2arr(x):
@@ -607,14 +621,23 @@ class ICON(pl.LightningModule):
 
         # make_test_gif("/".join(self.export_dir.split("/")[:-2]))
 
-        accu_outputs = accumulate(
-            outputs,
-            rot_num=3,
-            split={
-                "cape-easy": (0, 50),
-                "cape-hard": (50, 150)
-            },
-        )
+        if "cape" == self.cfg.dataset.types[0]:
+            accu_outputs = accumulate(
+                outputs,
+                rot_num=3,
+                split={
+                    "cape-easy": (0, 50),
+                    "cape-hard": (50, 150)
+                },
+            )
+        elif "thuman2" == self.cfg.dataset.types[0]:
+            accu_outputs = accumulate(
+                outputs,
+                rot_num=36,
+                split={
+                    "thuman2": (0, 5),
+                },
+            )
 
         print(colored(self.cfg.name, "green"))
         print(colored(self.cfg.dataset.noise_scale, "green"))
@@ -660,8 +683,16 @@ class ICON(pl.LightningModule):
                 in_tensor_dict[name] = in_tensor_dict[name][0:1]
 
         self.netG.eval()
+
+        if self.prior_type == "pifuhd_fine":
+            features_global = self.netG.filter_global(in_tensor_dict)
+        else:
+            features_global = None
         features, inter = self.netG.filter(in_tensor_dict, return_inter=True)
-        sdf = self.reconEngine(opt=self.cfg, netG=self.netG, features=features, proj_matrix=None)
+        
+
+        sdf = self.reconEngine(opt=self.cfg, netG=self.netG, features=features, 
+                               proj_matrix=None, global_features=features_global)
 
         if sdf is not None:
             render = self.reconEngine.display(sdf)
@@ -702,9 +733,15 @@ class ICON(pl.LightningModule):
         )
 
         with torch.no_grad():
+            if self.prior_type == "pifuhd_fine":
+                features_global = self.netG.filter_global(in_tensor_dict)
+            else:
+                features_global = None
+
             features, inter = self.netG.filter(in_tensor_dict, return_inter=True)
             sdf = self.reconEngine(
-                opt=self.cfg, netG=self.netG, features=features, proj_matrix=None
+                opt=self.cfg, netG=self.netG, features=features, proj_matrix=None,
+                global_features = features_global
             )
 
         verts_pr, faces_pr = self.reconEngine.export_mesh(sdf)

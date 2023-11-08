@@ -30,7 +30,9 @@ class Camera:
         # self.focal_y = focal / 2.
         #============ Previous setting ============#
         # Set defalut fov as 60 degree.
-        focal = np.sqrt(3) * height
+        # focal = np.sqrt(3) * height
+        self.fov = 40
+        focal = height / np.tan(np.deg2rad(self.fov / 2))
         self.focal_x = focal / 2.
         self.focal_y = focal / 2.
         # Principal Point Offset
@@ -49,7 +51,8 @@ class Camera:
         #============ Previous setting ============#
         # self.center = np.array([0, 0, 1.6])
         #============ Previous setting ============#
-        self.center = np.array([0, 0, 2.0])
+        self.center = np.array([0, 0, 2.0]) # for fov 60
+        self.center = np.array([0, 0, 2.9])
         self.direction = np.array([0, 0, -1])
         self.right = np.array([1, 0, 0])
         self.up = np.array([0, 1, 0])

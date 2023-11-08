@@ -249,9 +249,10 @@ def load_perspective_calib(param, render_size=512):
     # intrinsic[2, 2] = 1.
     # intrinsic[3, 2] = -1.
 
+    fov = param['fov']
     intrinsic = np.zeros([4, 4])
-    intrinsic[0, 0] = np.sqrt(3)
-    intrinsic[1, 1] = -np.sqrt(3)
+    intrinsic[0, 0] = 1 / np.tan(np.deg2rad(fov / 2))
+    intrinsic[1, 1] = -1 / np.tan(np.deg2rad(fov / 2))
     intrinsic[2, 2] = 1.
     intrinsic[3, 3] = 1.
     

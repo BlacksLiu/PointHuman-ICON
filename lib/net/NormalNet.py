@@ -16,7 +16,6 @@
 
 from lib.net.FBNet import define_G
 from lib.net.net_util import init_net, VGGLoss
-from lib.net.HGFilters import *
 from lib.net.BasePIFuNet import BasePIFuNet
 import torch
 import torch.nn as nn
@@ -44,6 +43,8 @@ class NormalNet(BasePIFuNet):
 
         if self.training:
             self.vgg_loss = [VGGLoss()]
+
+        #in_nml: (('image',3), ('T_normal_F',3), ('T_normal_B',3))
 
         self.in_nmlF = [
             item[0] for item in self.opt.in_nml if '_F' in item[0] or item[0] == 'image'

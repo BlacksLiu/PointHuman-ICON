@@ -53,20 +53,37 @@ if __name__ == "__main__":
 
     if cfg.test_mode or args.test_mode:
 
+        # uncomment these lines to test on the THuman2 dataset
         cfg_test_mode = [
             "test_mode",
             True,
             "dataset.types",
-            ["cape"],
+            ["thuman2"],
             "dataset.scales",
             [100.0],
             "dataset.rotation_num",
-            3,
+            36,
             "mcube_res",
             256,
             "clean_mesh",
             True,
         ]
+
+        # uncomment these lines to test on the cape dataset
+        # cfg_test_mode = [
+        #     "test_mode",
+        #     True,
+        #     "dataset.types",
+        #     ["cape"],
+        #     "dataset.scales",
+        #     [100.0],
+        #     "dataset.rotation_num",
+        #     3,
+        #     "mcube_res",
+        #     256,
+        #     "clean_mesh",
+        #     True,
+        # ]
         cfg.merge_from_list(cfg_test_mode)
 
     freq_eval = cfg.freq_eval

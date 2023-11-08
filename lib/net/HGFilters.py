@@ -97,6 +97,8 @@ class HGFilter(nn.Module):
             self.down_conv2 = nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1)
         elif self.opt.hg_down == 'ave_pool':
             self.conv2 = ConvBlock(64, 128, self.opt)
+        elif self.opt.hg_down == 'no_down': # offcial implment
+            self.conv2 = ConvBlock(64, 128, self.opt)
         else:
             raise NameError('Unknown Fan Filter setting!')
 
@@ -139,6 +141,8 @@ class HGFilter(nn.Module):
         elif self.opt.hg_down in ['conv64', 'conv128']:
             x = self.conv2(x)
             x = self.down_conv2(x)
+        elif self.opt.hg_down == 'no_down':
+            x = self.conv2(x)
         else:
             raise NameError('Unknown Fan Filter setting!')
 

@@ -91,8 +91,35 @@ class HGPIFuNet(BasePIFuNet):
             else:
                 self.channels_filter = [normal_F_lst + normal_B_lst]
 
+        if self.prior_type == "pifuhd_fine":
+            self.opt_coarse = cfg.coarse.net
+            # construct coarse pifuhd
+            self.use_filter_coarse = self.opt_coarse.use_filter
+            self.hourglass_dim_coarse = self.opt_coarse.hourglass_dim
+            if self.use_filter_coarse:
+                if self.opt_coarse.gtype == "HGPIFuNet":
+                    self.F_filter_coarse = HGFilter(self.opt_coarse, 
+                                             self.opt_coarse.num_stack, 
+                                             len(self.channels_filter[0]))
+                    self.F_filter_coarse.requires_grad_(False)
+                else:
+                    print(colored(f"Coarse Backbone {self.opt_coarse.gtype} is unimplemented", "green"))
+            channels_IF_coarse = self.opt_coarse.mlp_dim
+            # add z_dim
+            channels_IF_coarse[0] = self.hourglass_dim_coarse + 1
+            self.if_regressor_coarse = MLP(
+                filter_channels=channels_IF_coarse,
+                name="if_coarse",
+                res_layers=self.opt_coarse.res_layers,
+                norm=self.opt_coarse.norm_mlp,
+                last_op=nn.Sigmoid() if not cfg.test_mode else None,
+                merge_layer=self.opt_coarse.merge_layer, #  add phi and merge_layer for pifuhd
+            )
+            self.if_regressor_coarse.requires_grad_(False)
+
+
         use_vis = (self.prior_type in ["icon", "keypoint"]) and ("vis" in self.smpl_feats)
-        if self.prior_type in ["pamir", "pifu"]:
+        if self.prior_type in ["pamir", "pifu", 'pifuhd_coarse', 'pifuhd_fine']:
             use_vis = 1
 
         if self.use_filter:
@@ -125,6 +152,14 @@ class HGPIFuNet(BasePIFuNet):
 
         elif self.prior_type == "pifu":
             channels_IF[0] += 1
+        elif self.prior_type == "pifuhd_coarse":
+            channels_IF[0] += 1
+            # assert channels_IF[0] == 257
+        elif self.prior_type == "pifuhd_fine":
+            # global embedding dim(256) + local embedding dim(16) = 272 
+            channels_IF[0] += self.hourglass_dim_coarse
+            assert channels_IF[0] == 272
+        
         else:
             print(f"don't support {self.prior_type}!")
 
@@ -135,6 +170,8 @@ class HGPIFuNet(BasePIFuNet):
 
         self.pamir_keys = ["voxel_verts", "voxel_faces", "pad_v_num", "pad_f_num"]
         self.pifu_keys = []
+        self.pifuhd_coarse_keys = []
+        self.pifuhd_fine_keys = []
 
         self.if_regressor = MLP(
             filter_channels=channels_IF,
@@ -142,6 +179,7 @@ class HGPIFuNet(BasePIFuNet):
             res_layers=self.opt.res_layers,
             norm=self.opt.norm_mlp,
             last_op=nn.Sigmoid() if not cfg.test_mode else None,
+            merge_layer=self.opt.merge_layer, #  add phi and merge_layer for pifuhd
         )
 
         self.sp_encoder = SpatialEncoder()
@@ -149,6 +187,7 @@ class HGPIFuNet(BasePIFuNet):
         # network
         if self.use_filter:
             if self.opt.gtype == "HGPIFuNet":
+                # change net num_hourglass hourglass_dim
                 self.F_filter = HGFilter(self.opt, self.opt.num_stack, len(self.channels_filter[0]))
             else:
                 print(colored(f"Backbone {self.opt.gtype} is unimplemented", "green"))
@@ -169,6 +208,12 @@ class HGPIFuNet(BasePIFuNet):
         elif self.prior_type == "pamir":
             summary_log += f"Dim of Image Features (global): {self.hourglass_dim}\n"
             summary_log += f"Dim of Geometry Features (PaMIR): {self.voxel_dim}\n"
+        elif self.prior_type == "pifuhd_coarse":
+            summary_log += f"Dim of Image Features (global): {self.hourglass_dim}\n"
+            summary_log += f"Dim of Geometry Features (PIFuhd_coarse): 1 (z-value)\n"
+        elif self.prior_type == "pifuhd_fine":
+            summary_log += f"Dim of Image Features (local): {self.hourglass_dim}\n"
+            summary_log += f"Dim of Geometry Features (PIFuhd_coarse): {self.opt_coarse.hourglass_dim} \n"
         else:
             summary_log += f"Dim of Image Features (global): {self.hourglass_dim}\n"
             summary_log += f"Dim of Geometry Features (PIFu): 1 (z-value)\n"
@@ -221,6 +266,27 @@ class HGPIFuNet(BasePIFuNet):
 
         return mask
 
+    def filter_global(self, in_tensor_dict, return_inter=False):
+        '''
+            Filter the input images (pifuhd_coarse)
+            store all intermediate features.
+            :param images: [B, C, H, W] input images
+        '''
+        in_filter = self.get_normal(in_tensor_dict)
+        
+        features_G = []
+
+        with torch.no_grad():
+            features_G = self.F_filter_coarse(in_filter[:, self.channels_filter[0]])
+
+        # only produce the last im_feat
+        features_out = [features_G[-1]]
+
+        if return_inter:
+            return features_out, in_filter
+        else:
+            return features_out
+
     def filter(self, in_tensor_dict, return_inter=False):
         """
         Filter the input images
@@ -267,7 +333,7 @@ class HGPIFuNet(BasePIFuNet):
         else:
             return features_out
 
-    def query(self, features, points, calibs, transforms=None, regressor=None):
+    def query(self, features, points, calibs, transforms=None, regressor=None, global_feat=None):
 
         xyz = self.projection(points, calibs, transforms)
 
@@ -278,6 +344,11 @@ class HGPIFuNet(BasePIFuNet):
 
         preds_list = []
         vol_feats = features
+
+        if self.prior_type == "pifuhd_fine":
+            glo_feats = global_feat
+        else:
+            glo_feats = features
 
         if self.prior_type in ["icon", "keypoint"]:
 
@@ -318,7 +389,7 @@ class HGPIFuNet(BasePIFuNet):
             vol = self.voxelization(voxel_verts)    # vol ~ [0,1]
             vol_feats = self.ve(vol, intermediate_output=self.training)
 
-        for im_feat, vol_feat in zip(features, vol_feats):
+        for im_feat, vol_feat, glo_feat in zip(features, vol_feats, glo_feats):
 
             # normal feature choice by smpl_vis
 
@@ -349,10 +420,25 @@ class HGPIFuNet(BasePIFuNet):
             elif self.prior_type == "pifu":
                 point_feat_list = [self.index(im_feat, xy), z]
 
+            elif self.prior_type == "pifuhd_coarse":
+                point_feat_list = [self.index(im_feat, xy), z]
+
+            elif self.prior_type == "pifuhd_fine":
+                local_feat = self.index(im_feat, xy)
+
+                # get global feat 
+                point_feat_coarse = torch.cat([self.index(glo_feat, xy), z], 1)
+                # MLP get phi
+                _, phi = self.if_regressor_coarse(point_feat_coarse)
+
+                phi = phi.detach()
+
+                point_feat_list = [local_feat, phi]
+
             point_feat = torch.cat(point_feat_list, 1)
 
             # out of image plane is always set to 0
-            preds = regressor(point_feat)
+            preds, _ = regressor(point_feat)
             preds = in_cube * preds
 
             preds_list.append(preds)
@@ -391,10 +477,18 @@ class HGPIFuNet(BasePIFuNet):
         calib_tensor = in_tensor_dict["calib"]
         label_tensor = in_tensor_dict["label"]
 
+        # local filter
         in_feat = self.filter(in_tensor_dict)
-
+        
+        if self.prior_type == "pifuhd_fine":
+            global_feat = self.filter_global(in_tensor_dict)
+        else:
+            global_feat = None
+            
+        # input 
         preds_if_list = self.query(
-            in_feat, sample_tensor, calib_tensor, regressor=self.if_regressor
+            in_feat, sample_tensor, calib_tensor, 
+            regressor=self.if_regressor, global_feat=global_feat
         )
 
         error = self.get_error(preds_if_list, label_tensor)

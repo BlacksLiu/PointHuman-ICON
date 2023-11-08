@@ -1,7 +1,9 @@
 name: pifu
 ckpt_dir: "./data/ckpt/"
-resume_path: "./data/ckpt/pifu.ckpt"
-normal_path: "./data/ckpt/normal.ckpt"
+# resume_path: "./data/ckpt/pifu.ckpt"
+# normal_path: "./data/ckpt/normal.ckpt"
+resume_path: "/mnt/local4T/pengfei/projects/PointHuman/PointHuman-ICON/data/ckpt/pifu/epoch=03.ckpt"
+normal_path: "./data/ckpt/normal/Normal-epoch=19.ckpt"
 results_path: "./results"
 
 dataset:
